@@ -72,6 +72,11 @@ class IorTestBase(DfuseTestBase):
         if self.ior_cmd.dfs_oclass:
             self.container.oclass.update(self.ior_cmd.dfs_oclass.value)
 
+        # update container chunk size
+        # TODO verify this doesn't break anything
+        if self.ior_cmd.dfs_chunk:
+            self.container.chunk_size.update(self.ior_cmd.dfs_chunk.value)
+
         # create container
         self.container.create()
 
@@ -92,7 +97,7 @@ class IorTestBase(DfuseTestBase):
         if pool.dmg:
             pool.set_query_data()
 
-    def run_ior_with_pool(self, intercept=None, test_file_suffix="",
+    def run_ior_with_pool(self, intercept=None, intercept_info=True, test_file_suffix="",
                           test_file="daos:/testFile", create_pool=True,
                           create_cont=True, stop_dfuse=True, plugin_path=None,
                           timeout=None, fail_on_warning=False,
@@ -105,7 +110,9 @@ class IorTestBase(DfuseTestBase):
 
         Args:
             intercept (str, optional): path to the interception library. Shall
-                    be used only for POSIX through DFUSE. Defaults to None.
+                be used only for POSIX through DFUSE. Defaults to None.
+            intercept_info (bool, optional): whether to set D_LOG_MASK to INFO when using
+                the interception library. Defaults to True.
             test_file_suffix (str, optional): suffix to add to the end of the
                 test file name. Defaults to "".
             test_file (str, optional): ior test file name. Defaults to
@@ -156,7 +163,7 @@ class IorTestBase(DfuseTestBase):
         job_manager.timeout = timeout
         try:
             out = self.run_ior(job_manager, self.processes,
-                               intercept, plugin_path=plugin_path,
+                               intercept, intercept_info, plugin_path=plugin_path,
                                fail_on_warning=fail_on_warning,
                                out_queue=out_queue, env=env)
         finally:
@@ -201,7 +208,7 @@ class IorTestBase(DfuseTestBase):
             if mpio_util.mpich_installed(self.hostlist_clients) is False:
                 self.fail("Exiting Test: Mpich not installed")
         else:
-            self.fail("Unsupported IOR API")
+            self.fail("Unsupported IOR API: {}".format(self.ior_cmd.api.value))
 
         if custom_ior_cmd:
             self.job_manager = Mpirun(custom_ior_cmd, self.subprocess, "mpich")
@@ -224,7 +231,7 @@ class IorTestBase(DfuseTestBase):
                 self.job_manager.process, self.ior_cmd):
             self.fail("Exiting Test: Subprocess not running")
 
-    def run_ior(self, manager, processes, intercept=None, display_space=True,
+    def run_ior(self, manager, processes, intercept=None, intercept_info=True, display_space=True,
                 plugin_path=None, fail_on_warning=False, pool=None,
                 out_queue=None, env=None):
         """Run the IOR command.
@@ -233,6 +240,8 @@ class IorTestBase(DfuseTestBase):
             manager (str): mpi job manager command
             processes (int): number of host processes
             intercept (str, optional): path to interception library.
+            intercept_info (bool, optional): whether to set D_LOG_MASK to INFO when using
+                the interception library. Defaults to True.
             display_space (bool, optional): Whether to display the pool
                 space. Defaults to True.
             plugin_path (str, optional): HDF5 vol connector library path.
@@ -251,9 +260,11 @@ class IorTestBase(DfuseTestBase):
             env = self.ior_cmd.get_default_env(str(manager), self.client_log)
         if intercept:
             env['LD_PRELOAD'] = intercept
-            env['D_LOG_MASK'] = 'INFO'
-            if env.get('D_IL_REPORT', None) is None:
-                env['D_IL_REPORT'] = '1'
+            if intercept_info:
+                # TODO better to set D_LOG_MASK for each test instead of overwriting here
+                env['D_LOG_MASK'] = 'INFO'
+                if env.get('D_IL_REPORT', None) is None:
+                    env['D_IL_REPORT'] = '1'
 
             #env['D_LOG_MASK'] = 'INFO,IL=DEBUG'
             #env['DD_MASK'] = 'all'
