@@ -39,6 +39,7 @@ enum {
 		D_DEBUG(DB_TRACE, "Evicting lid "DF_DTI": lid=%d\n",	\
 			DP_DTI(&DAE_XID(dae)), DAE_LID(dae));		\
 		d_list_del_init(&dae->dae_link);			\
+		D_ASSERT(cont->vc_dtx_array != NULL);			\
 		lrua_evictx(cont->vc_dtx_array,				\
 			    DAE_LID(dae) - DTX_LID_RESERVED,		\
 			    DAE_EPOCH(dae));				\
@@ -963,6 +964,13 @@ vos_dtx_alloc(struct vos_dtx_blob_df *dbd, struct dtx_handle *dth)
 	cont = vos_hdl2cont(dth->dth_coh);
 	D_ASSERT(cont != NULL);
 
+	vos_dtx_array_acquire(cont);
+	if (cont->vc_dtx_array == NULL) {
+		rc = -DER_NOMEM;
+		D_ERROR("Failed to re-create DTX active array: "DF_RC"\n",
+			DP_RC(rc));
+	}
+
 	rc = lrua_allocx(cont->vc_dtx_array, &idx, dth->dth_epoch, &dae);
 	if (rc != 0) {
 		/** The array is full, need to commit some transactions first */
@@ -1121,8 +1129,12 @@ vos_dtx_check_availability(daos_handle_t coh, uint32_t entry,
 	cont = vos_hdl2cont(coh);
 	D_ASSERT(cont != NULL);
 
-	found = lrua_lookupx(cont->vc_dtx_array, entry - DTX_LID_RESERVED,
-			     epoch, &dae);
+	if (cont->vc_dtx_array) {
+		found = lrua_lookupx(cont->vc_dtx_array, entry - DTX_LID_RESERVED,
+				     epoch, &dae);
+	} else {
+		found = false;
+	}
 
 	/* The DTX owner can always see the DTX. */
 	if (found && dtx_is_valid_handle(dth) && dae == dth->dth_ent)
@@ -1504,8 +1516,12 @@ vos_dtx_deregister_record(struct umem_instance *umm, daos_handle_t coh,
 	if (cont == NULL)
 		return;
 
-	found = lrua_lookupx(cont->vc_dtx_array, entry - DTX_LID_RESERVED,
-			     epoch, &dae);
+	if (cont->vc_dtx_array) {
+		found = lrua_lookupx(cont->vc_dtx_array, entry - DTX_LID_RESERVED,
+				     epoch, &dae);
+	} else {
+		found = false;
+	}
 	if (!found) {
 		D_WARN("Could not find active DTX record for lid=%d, epoch="
 		       DF_U64"\n", entry, epoch);
@@ -2020,6 +2036,10 @@ vos_dtx_post_handle(struct vos_container *cont,
 			DAE_FLAGS(daes[i]) &= ~(DTE_CORRUPTED | DTE_ORPHAN);
 		}
 	}
+
+	if (d_list_empty(&cont->vc_dtx_act_list))
+		vos_dtx_array_release(cont);
+
 }
 
 int
@@ -2208,7 +2228,10 @@ vos_dtx_aggregate(daos_handle_t coh)
 		return 0;
 
 	/** Take the opportunity to free some memory if we can */
-	lrua_array_aggregate(cont->vc_dtx_array);
+	if (cont->vc_dtx_array != NULL) {
+		lrua_array_aggregate(cont->vc_dtx_array);
+		vos_slab_reclaim();
+	}
 
 	rc = umem_tx_begin(umm, NULL);
 	if (rc != 0) {
@@ -2456,6 +2479,10 @@ vos_dtx_act_reindex(struct vos_container *cont)
 					" is invalid\n", dae_df->dae_lid);
 				D_GOTO(out, rc = -DER_IO);
 			}
+			vos_dtx_array_acquire(cont);
+			if (cont->vc_dtx_array == NULL)
+				D_GOTO(out, -DER_NOMEM);
+
 			rc = lrua_allocx_inplace(cont->vc_dtx_array,
 					 dae_df->dae_lid - DTX_LID_RESERVED,
 					 dae_df->dae_epoch, &dae);
@@ -2855,22 +2882,11 @@ vos_dtx_cache_reset(daos_handle_t coh)
 			       DP_RC(rc));
 	}
 
-	if (cont->vc_dtx_array)
-		lrua_array_free(cont->vc_dtx_array);
+	vos_dtx_array_release(cont);
 
 	cont->vc_dtx_active_hdl = DAOS_HDL_INVAL;
 	cont->vc_dtx_committed_hdl = DAOS_HDL_INVAL;
 	cont->vc_dtx_committed_count = 0;
-
-	rc = lrua_array_alloc(&cont->vc_dtx_array, DTX_ARRAY_LEN, DTX_ARRAY_NR,
-			      sizeof(struct vos_dtx_act_ent),
-			      LRU_FLAG_REUSE_UNIQUE,
-			      NULL, NULL);
-	if (rc != 0) {
-		D_ERROR("Failed to re-create DTX active array: "DF_RC"\n",
-			DP_RC(rc));
-		goto out;
-	}
 
 	memset(&uma, 0, sizeof(uma));
 	uma.uma_id = UMEM_CLASS_VMEM;
