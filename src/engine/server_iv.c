@@ -1047,6 +1047,8 @@ sync_comp_cb(void *arg, int rc)
 		 */
 		D_WARN("retry for class %d opc %d rc "DF_RC"\n",
 			cb_arg->iv_key.class_id, IV_UPDATE, DP_RC(rc));
+		/* sleep 1sec and retry */
+		dss_sleep(1000);
 		rc1 = iv_op(cb_arg->ns, &cb_arg->iv_key, &cb_arg->iv_value,
 			    &cb_arg->iv_sync, cb_arg->shortcut, cb_arg->retry,
 			    cb_arg->opc);
@@ -1128,8 +1130,8 @@ retry:
 		 */
 		D_WARN("retry upon %d for class %d opc %d\n", rc,
 		       key->class_id, opc);
-		/* Yield to avoid hijack the cycle if IV RPC is not sent */
-		ABT_thread_yield();
+		/* sleep 1sec and retry */
+		dss_sleep(1000);
 		goto retry;
 	}
 
