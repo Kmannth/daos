@@ -8,6 +8,7 @@ import os
 from time import sleep, time
 import ctypes
 import json
+import random
 
 from test_utils_base import TestDaosApiBase
 from avocado import fail_on
@@ -78,6 +79,7 @@ class TestPool(TestDaosApiBase):
         self.pool = None
         self.info = None
         self.svc_ranks = None
+        self.tgt_ranks = None
         self.connected = False
         # Flag to allow the non-create operations to use UUID. e.g., if you want
         # to destroy the pool with UUID, set this to False, then call destroy().
@@ -274,6 +276,10 @@ class TestPool(TestDaosApiBase):
                 int(self.pool.svc.rl_ranks[index])
                 for index in range(self.pool.svc.rl_nr)]
 
+            # Set the storage (target) ranks.
+            self.tgt_ranks = [int(v) for v in data["ranks"].split(",")]
+
+
     @fail_on(DaosApiError)
     def connect(self, permission=2):
         """Connect to the pool.
@@ -343,6 +349,7 @@ class TestPool(TestDaosApiBase):
             self.pool = None
             self.info = None
             self.svc_ranks = None
+            self.tgt_ranks = None
 
         return status
 
@@ -461,6 +468,96 @@ class TestPool(TestDaosApiBase):
             for key, val in list(locals().items())
             if key != "self" and val is not None]
         return self._check_info(checks)
+
+    def choose_rebuild_ranks(self, num_ranks, num_svc=0, max_svc=1, shuffle=True,
+                             skip_ms_rank=True):
+        """Choose a list of ranks to kill for rebuild tests.
+
+        The list of ranks to be killed will be chosen based on a set
+        of criteria defined by the current state of the product code.
+        The goal is to choose "safe" ranks in order to avoid killing
+        too many svc ranks, non-resilient MS ranks, or other problems
+        that are likely to result in intermittent test failures.
+
+        Args:
+            num_ranks (int): the total number of ranks to be chosen
+            num_svc (int, optional): the number of pool service ranks to kill
+            max_svc (int, optional): the maximum number of pool service ranks to kill
+            shuffle (bool, optional): whether to shuffle the storage ranks before choosing
+            skip_ms_rank (bool, optional): avoid the MS rank (DAOS-4891)
+
+        Returns:
+            list: list of ranks to be killed
+        """
+        svc_ranks = {s:True for s in self.svc_ranks}
+        tgt_ranks = self.tgt_ranks.copy()
+        to_kill = []
+
+        # If there is only 1 svc rank and the test has not
+        # explicitly requested to kill it, then don't allow it
+        # to be chosen.
+        if len(svc_ranks) == 1 and num_svc == 0:
+            max_svc = 0
+
+        # If the test has made an explicit request to kill some number
+        # of service ranks, set that value as the ceiling.
+        if num_svc > max_svc:
+            max_svc = num_svc
+
+        if num_svc > len(svc_ranks):
+            raise DaosTestError("num_svc > svc_ranks ({} < {})".format(num_svc, len(svc_ranks)))
+
+        if num_ranks > len(tgt_ranks):
+            raise DaosTestError("num_ranks > tgt_ranks ({} < {})".format(num_ranks, len(tgt_ranks)))
+
+        if shuffle:
+            random.shuffle(tgt_ranks)
+
+        if len(tgt_ranks) == num_ranks:
+            return tgt_ranks
+
+        for tr in tgt_ranks:
+            if tr == 0 and skip_ms_rank:
+                continue
+
+            if tr in svc_ranks:
+                # skip if we already have enough svc ranks
+                if max_svc < 1:
+                    continue
+                max_svc -= 1
+                num_svc -= 1
+            elif num_svc > 0:
+                # skip until we find another svc rank
+                continue
+
+            to_kill.append(tr)
+
+            if len(to_kill) == num_ranks:
+                break
+
+        if len(to_kill) < num_ranks:
+            raise DaosTestError("Failed to find ranks: {} < {})".format(len(to_kill), num_ranks))
+
+        self.log.debug("ranks to kill: %s", to_kill)
+        return to_kill
+
+    def get_storage_ranks(self, exclude_svc_ranks=True):
+        """Get the list of storage ranks for the pool.
+
+        By default, the pool service ranks are excluded from the result, if
+        there are more storage-only ranks than storage+service ranks.
+
+        Args:
+            exclude_svc_ranks (bool, optional): exclude service ranks, if possible.
+
+        Returns:
+            list: list of storage ranks
+        """
+        if not exclude_svc_ranks or len(self.svc_ranks) >= len(self.tgt_ranks):
+            return self.tgt_ranks
+
+        svc_ranks = {s:True for s in self.svc_ranks}
+        return [t for t in self.tgt_ranks if t not in svc_ranks]
 
     def check_pool_space(self, ps_free_min=None, ps_free_max=None,
                          ps_free_mean=None, ps_ntargets=None, ps_padding=None):
